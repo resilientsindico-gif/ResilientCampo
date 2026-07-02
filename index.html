@@ -203,10 +203,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
       <input id="md-cat-nova" placeholder="Ou digite uma nova categoria..." style="margin-top:6px;">
     </div>
     <div class="fg"><label>Descrição da demanda *</label><textarea id="md-desc" rows="3" placeholder="Descreva o que precisa ser feito..."></textarea></div>
-    <div class="fg"><label>Foto (opcional)</label>
+    <div class="fg"><label>Fotos (até 4, opcional)</label>
       <input type="file" id="md-foto-input" accept="image/*" capture="environment" style="display:none;" onchange="capturarFotoDemanda(this)">
-      <button class="btn btn-ghost" onclick="document.getElementById('md-foto-input').click()">📷 Adicionar Foto</button>
-      <img id="md-foto-preview" class="foto-preview hidden">
+      <button class="btn btn-ghost" id="md-foto-btn" onclick="document.getElementById('md-foto-input').click()">📷 Adicionar Foto (0/4)</button>
+      <div id="md-fotos-preview" style="margin-top:6px;"></div>
+    </div>
+    <div class="fg"><label>Vídeo (opcional, até 25MB)</label>
+      <input type="file" id="md-video-input" accept="video/*" capture="environment" style="display:none;" onchange="capturarVideoDemanda(this)">
+      <button class="btn btn-ghost" onclick="document.getElementById('md-video-input').click()">🎥 Adicionar Vídeo</button>
+      <div id="md-video-preview" style="margin-top:6px;"></div>
     </div>
     <div class="fg"><label>Prioridade</label>
       <select id="md-prioridade"><option value="normal">Normal</option><option value="urgente">Urgente</option></select>
@@ -262,7 +267,10 @@ let DB={usuarios:[],condominios:[],demandas:[],visitas:[],vinculos:[]};
 let USUARIO_LOGADO=null;
 let CONDO_ATUAL=null;
 let _fotoChegada=null;
-let _fotoDemanda=null;
+let _fotoDemanda=null; // mantido por compatibilidade, não usado mais na criação
+let _fotosDemanda=[]; // array de fotos em base64 (até 4)
+let _videoDemanda=null; // vídeo em base64 (até 1)
+const MAX_FOTOS_DEMANDA=4;
 let _fotoExecAntes=null;
 let _fotoExecDepois=null;
 let _catSelecionada='';
@@ -510,10 +518,11 @@ function renderHistoricoCondo(){
 function renderDemandaCard(d){
   const statusBadge=d.status==='concluida'?'<span class="badge b-green">Concluída</span>':d.status==='andamento'?'<span class="badge b-yellow">Em Andamento</span>':'<span class="badge b-orange">Aberta</span>';
   const condo=DB.condominios.find(c=>c.id===d.condoId);
+  const responsavel=d.atribuidoPara?DB.usuarios.find(u=>u.id===d.atribuidoPara):null;
   return `<div class="demanda-card ${d.status==='concluida'?'concluida':''}" onclick="verDemanda('${d.id}')">
     <div class="topo"><strong>${d.categoria}</strong>${statusBadge}</div>
     <div class="desc">${d.descricao}</div>
-    <div class="meta">🏢 ${condo?.nome||''} • 📅 ${formatarData(d.criadoEm)} ${d.prioridade==='urgente'?'• 🔴 Urgente':''}</div>
+    <div class="meta">🏢 ${condo?.nome||''} • 📅 ${formatarData(d.criadoEm)} ${d.prioridade==='urgente'?'• 🔴 Urgente':''}${responsavel?` • 👤 ${responsavel.nome}`:''}</div>
   </div>`;
 }
 
@@ -523,6 +532,8 @@ function registrarChegada(){
   document.getElementById('chegada-obs').value='';
   _fotoChegada=null;
   document.getElementById('chegada-info').textContent=`Confirme sua chegada em ${CONDO_ATUAL.nome}. Será registrado com foto e localização.`;
+  const btn=document.querySelector('#modal-chegada .btn-green');
+  btn.disabled=false;btn.textContent='✅ Confirmar Chegada';
   abrirModal('modal-chegada');
 }
 
@@ -534,6 +545,11 @@ function capturarFotoChegada(input){
 }
 
 function confirmarChegada(){
+  const btn=document.querySelector('#modal-chegada .btn-green');
+  if(btn.disabled)return; // trava contra clique duplo
+  btn.disabled=true;
+  const txtOriginal=btn.textContent;
+  btn.textContent='⏳ Registrando...';
   const obs=document.getElementById('chegada-obs').value.trim();
   function salvar(lat,lng){
     DB.visitas.push({id:gid(),usuarioId:USUARIO_LOGADO.id,usuarioNome:USUARIO_LOGADO.nome,condoId:CONDO_ATUAL.id,condoNome:CONDO_ATUAL.nome,data:new Date().toISOString(),foto:_fotoChegada,obs,lat,lng});
@@ -541,6 +557,7 @@ function confirmarChegada(){
     fm('modal-chegada');
     atualizarStatusChegada();
     renderHome();
+    btn.disabled=false;btn.textContent=txtOriginal;
     const msgOffline=!navigator.onLine?' (será sincronizado quando voltar a internet)':'';
     alert('✅ Chegada registrada com sucesso!'+msgOffline);
   }
@@ -559,9 +576,12 @@ function abrirModalDemanda(){
   document.getElementById('md-condo-id').value=CONDO_ATUAL.id;
   document.getElementById('md-desc').value='';
   document.getElementById('md-cat-nova').value='';
-  document.getElementById('md-foto-preview').classList.add('hidden');
   document.getElementById('md-prioridade').value='normal';
-  _fotoDemanda=null;_catSelecionada='';
+  _fotosDemanda=[];_videoDemanda=null;_catSelecionada='';
+  renderFotosDemandaPreview();
+  renderVideoDemandaPreview();
+  const btn=document.querySelector('#modal-demanda .btn-orange');
+  btn.disabled=false;btn.textContent='Abrir Demanda';
   renderCategoriasChips();
   abrirModal('modal-demanda');
 }
@@ -574,26 +594,62 @@ function selecionarCategoria(c){_catSelecionada=c;document.getElementById('md-ca
 
 function capturarFotoDemanda(input){
   const file=input.files[0];if(!file)return;
+  if(_fotosDemanda.length>=MAX_FOTOS_DEMANDA){alert('Máximo de '+MAX_FOTOS_DEMANDA+' fotos por demanda.');input.value='';return;}
   const reader=new FileReader();
-  reader.onload=e=>{_fotoDemanda=e.target.result;document.getElementById('md-foto-preview').src=e.target.result;document.getElementById('md-foto-preview').classList.remove('hidden');};
+  reader.onload=e=>{_fotosDemanda.push(e.target.result);renderFotosDemandaPreview();};
   reader.readAsDataURL(file);
+  input.value='';
+}
+function removerFotoDemanda(idx){_fotosDemanda.splice(idx,1);renderFotosDemandaPreview();}
+function renderFotosDemandaPreview(){
+  const el=document.getElementById('md-fotos-preview');
+  if(!el)return;
+  el.innerHTML=_fotosDemanda.map((f,i)=>`<div style="position:relative;display:inline-block;margin:4px;">
+      <img src="${f}" style="width:70px;height:70px;object-fit:cover;border-radius:8px;">
+      <button type="button" onclick="removerFotoDemanda(${i})" style="position:absolute;top:-6px;right:-6px;background:#e33;color:#fff;border:none;border-radius:50%;width:20px;height:20px;font-size:12px;line-height:1;">×</button>
+    </div>`).join('');
+  const btnAdd=document.getElementById('md-foto-btn');
+  if(btnAdd)btnAdd.textContent=`📷 Adicionar Foto (${_fotosDemanda.length}/${MAX_FOTOS_DEMANDA})`;
+}
+function capturarVideoDemanda(input){
+  const file=input.files[0];if(!file)return;
+  if(file.size>25*1024*1024){alert('Vídeo muito grande (máx. 25MB). Grave um vídeo mais curto.');input.value='';return;}
+  const reader=new FileReader();
+  reader.onload=e=>{_videoDemanda=e.target.result;renderVideoDemandaPreview();};
+  reader.readAsDataURL(file);
+}
+function removerVideoDemanda(){_videoDemanda=null;renderVideoDemandaPreview();const inp=document.getElementById('md-video-input');if(inp)inp.value='';}
+function renderVideoDemandaPreview(){
+  const el=document.getElementById('md-video-preview');
+  if(!el)return;
+  el.innerHTML=_videoDemanda?`<div style="position:relative;display:inline-block;margin-top:6px;">
+      <video src="${_videoDemanda}" style="width:120px;height:70px;object-fit:cover;border-radius:8px;" muted></video>
+      <button type="button" onclick="removerVideoDemanda()" style="position:absolute;top:-6px;right:-6px;background:#e33;color:#fff;border:none;border-radius:50%;width:20px;height:20px;font-size:12px;line-height:1;">×</button>
+    </div>`:'';
 }
 
 function salvarDemanda(){
+  const btn=document.querySelector('#modal-demanda .btn-orange');
+  if(btn.disabled)return; // trava contra clique duplo
   const desc=document.getElementById('md-desc').value.trim();
   if(!desc){alert('Descreva a demanda.');return;}
   const catNova=document.getElementById('md-cat-nova').value.trim();
   const categoria=catNova||_catSelecionada||'Outro';
+  btn.disabled=true;const txtOriginal=btn.textContent;btn.textContent='⏳ Salvando...';
   function criar(lat,lng){
     const obj={id:gid(),condoId:CONDO_ATUAL.id,condoNome:CONDO_ATUAL.nome,categoria,descricao:desc,
-      foto:_fotoDemanda,prioridade:document.getElementById('md-prioridade').value,
-      status:'aberta',criadoPor:USUARIO_LOGADO.nome,criadoPorId:USUARIO_LOGADO.id,criadoEm:new Date().toISOString(),
+      fotos:_fotosDemanda.slice(),video:_videoDemanda,
+      foto:_fotosDemanda[0]||null, // compatibilidade com telas/versões antigas que leem "foto" único
+      prioridade:document.getElementById('md-prioridade').value,
+      status:'aberta',origem:'preposto',criadoPor:USUARIO_LOGADO.nome,criadoPorId:USUARIO_LOGADO.id,criadoEm:new Date().toISOString(),
+      atribuidoPara:'',
       lat,lng,fotoAntes:null,fotoDepois:null,execObs:'',concluidoEm:null,concluidoPor:''};
     DB.demandas.push(obj);
     salvarDB();
     fm('modal-demanda');
     renderDemandasCondo();
     renderHome();
+    btn.disabled=false;btn.textContent=txtOriginal;
     alert('✅ Demanda registrada!');
   }
   if(navigator.geolocation){
@@ -608,10 +664,13 @@ function salvarDemanda(){
 function verDemanda(id){
   const d=DB.demandas.find(x=>x.id===id);if(!d)return;
   const statusBadge=d.status==='concluida'?'<span class="badge b-green">Concluída</span>':d.status==='andamento'?'<span class="badge b-yellow">Em Andamento</span>':'<span class="badge b-orange">Aberta</span>';
-  let html=`<div style="margin-bottom:12px;">${statusBadge} <span class="badge b-blue">${d.categoria}</span> ${d.prioridade==='urgente'?'<span class="badge b-red">Urgente</span>':''}</div>
+  let html=`<div style="margin-bottom:12px;">${statusBadge} <span class="badge b-blue">${d.categoria}</span> ${d.prioridade==='urgente'?'<span class="badge b-red">Urgente</span>':''} ${d.tipo==='administrativa'?'<span class="badge b-blue">Tarefa do Síndico</span>':''}</div>
     <p style="margin-bottom:10px;">${d.descricao}</p>`;
-  if(d.foto)html+=`<img src="${d.foto}" class="foto-preview">`;
-  html+=`<div class="info-box blue">Aberta por ${d.criadoPor} em ${formatarData(d.criadoEm)}${d.lat?' • 📍 Localização registrada':''}</div>`;
+  const fotos=d.fotos&&d.fotos.length?d.fotos:(d.foto?[d.foto]:[]);
+  if(fotos.length)html+=`<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">${fotos.map(f=>`<img src="${f}" style="width:90px;height:90px;object-fit:cover;border-radius:8px;">`).join('')}</div>`;
+  if(d.video)html+=`<video src="${d.video}" controls style="width:100%;max-height:220px;border-radius:8px;margin-bottom:8px;"></video>`;
+  const responsavelVer=d.atribuidoPara?DB.usuarios.find(u=>u.id===d.atribuidoPara):null;
+  html+=`<div class="info-box blue">Aberta por ${d.criadoPor}${d.origem==='sindico'?' (Síndico)':''} em ${formatarData(d.criadoEm)}${d.lat?' • 📍 Localização registrada':''}${responsavelVer?` • Responsável: <strong>${responsavelVer.nome}</strong>`:''}</div>`;
   if(d.status==='concluida'){
     html+=`<div class="foto-row">
       ${d.fotoAntes?`<div class="foto-box"><div class="lbl" style="position:static;background:none;color:var(--text2);font-weight:700;margin-bottom:4px;">ANTES</div><img src="${d.fotoAntes}"></div>`:''}
@@ -649,8 +708,11 @@ function capturarFotoExec(input,tipo){
 }
 
 function concluirDemanda(){
+  const btn=document.querySelector('#modal-executar .btn-green');
+  if(btn.disabled)return; // trava contra clique duplo
+  btn.disabled=true;const txtOriginal=btn.textContent;btn.textContent='⏳ Salvando...';
   const id=document.getElementById('ex-demanda-id').value;
-  const d=DB.demandas.find(x=>x.id===id);if(!d)return;
+  const d=DB.demandas.find(x=>x.id===id);if(!d){btn.disabled=false;btn.textContent=txtOriginal;return;}
   d.status='concluida';
   d.fotoAntes=_fotoExecAntes;
   d.fotoDepois=_fotoExecDepois;
@@ -661,6 +723,7 @@ function concluirDemanda(){
   fm('modal-executar');
   renderDemandasCondo();
   renderHome();
+  btn.disabled=false;btn.textContent=txtOriginal;
   alert('✅ Demanda concluída!');
 }
 
