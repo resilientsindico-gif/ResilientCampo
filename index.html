@@ -277,7 +277,11 @@ let _fotoExecDepois=null;
 let _catSelecionada='';
 
 function gid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,5);}
-function salvarDB(){localStorage.setItem('resilient_campo_db',JSON.stringify(DB));enviarParaSheets();}
+// salvarDB agora aceita (aba,item): salva local E adiciona o item à fila de envio incremental
+function salvarDB(aba,item){
+  localStorage.setItem('resilient_campo_db',JSON.stringify(DB));
+  if(aba&&item)filaAdicionar(aba,item);
+}
 function carregarDB(){const r=localStorage.getItem('resilient_campo_db');if(r)DB=JSON.parse(r);}
 function fm(id){document.getElementById(id).classList.add('hidden');}
 function abrirModal(id){document.getElementById(id).classList.remove('hidden');}
@@ -294,57 +298,83 @@ function atualizarStatusConexao(){
   if(!el)return;
   if(!navigator.onLine){el.textContent='📡 Offline';el.style.background='rgba(192,57,43,.3)';}
   else{
-    const fila=JSON.parse(localStorage.getItem('resilient_campo_fila')||'[]');
-    if(fila.length>0){el.textContent='⏳ '+fila.length+' pendente(s)';el.style.background='rgba(214,137,16,.3)';}
+    const fila=filaLer();
+    if(_enviandoFila){el.textContent='📤 Enviando...';el.style.background='rgba(41,128,185,.3)';}
+    else if(fila.length>0){el.textContent='⏳ '+fila.length+' pendente(s)';el.style.background='rgba(214,137,16,.3)';}
     else{el.textContent='✅ Online';el.style.background='rgba(30,126,74,.3)';}
   }
 }
-window.addEventListener('online',function(){atualizarStatusConexao();processarFilaOffline();});
+window.addEventListener('online',function(){atualizarStatusConexao();processarFila();});
 window.addEventListener('offline',atualizarStatusConexao);
 
-// ===== FILA OFFLINE =====
-// Cada vez que salva algo, tenta enviar. Se falhar ou estiver offline, guarda na fila.
-function enviarParaSheets(){
+// ===== FILA DE ENVIO INCREMENTAL (v3) =====
+// Cada alteração vira UM item na fila. Só sai da fila quando o servidor
+// CONFIRMAR a gravação ({ok:true}). Nada mais é assumido.
+let _enviandoFila=false;
+function filaLer(){try{return JSON.parse(localStorage.getItem('resilient_campo_fila_v3')||'[]');}catch(e){return[];}}
+function filaGravar(f){localStorage.setItem('resilient_campo_fila_v3',JSON.stringify(f));}
+function filaAdicionar(aba,item){
+  const fila=filaLer();
+  // se o mesmo item já está na fila, substitui pela versão mais nova
+  const i=fila.findIndex(x=>x.aba===aba&&x.item&&x.item.id===item.id);
+  const entrada={fid:gid(),aba,item:JSON.parse(JSON.stringify(item)),data:new Date().toISOString()};
+  if(i>=0)fila[i]=entrada;else fila.push(entrada);
+  filaGravar(fila);
   atualizarStatusConexao();
-  if(!SCRIPT_URL)return;
-  if(!DB.usuarios.length&&!DB.condominios.length&&!DB.demandas.length&&!DB.visitas.length)return;
-
-  if(!navigator.onLine){
-    adicionarFilaOffline();
-    return;
-  }
-  const payload={acao:'syncAll',dados:DB};
-  fetch(SCRIPT_URL,{method:'POST',mode:'no-cors',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
-    .then(()=>{
-      // Sucesso (no-cors não confirma, mas assumimos OK) — limpa fila
-      localStorage.removeItem('resilient_campo_fila');
-      atualizarStatusConexao();
+  processarFila();
+}
+function processarFila(){
+  if(_enviandoFila)return;
+  const fila=filaLer();
+  if(!fila.length||!SCRIPT_URL||!navigator.onLine){atualizarStatusConexao();return;}
+  _enviandoFila=true;atualizarStatusConexao();
+  // agrupa por aba e envia uma aba por vez
+  const aba=fila[0].aba;
+  const doGrupo=fila.filter(x=>x.aba===aba);
+  const payload={acao:'upsertMany',aba,itens:doGrupo.map(x=>x.item)};
+  fetch(SCRIPT_URL,{method:'POST',redirect:'follow',body:JSON.stringify(payload)})
+    .then(r=>r.json())
+    .then(resp=>{
+      _enviandoFila=false;
+      if(resp&&resp.ok){
+        // confirmado pelo servidor: remove do fila SÓ o que foi enviado
+        const ids=doGrupo.map(x=>x.fid);
+        filaGravar(filaLer().filter(x=>!ids.includes(x.fid)));
+        atualizarStatusConexao();
+        if(filaLer().length)processarFila(); // continua com as outras abas
+      } else {
+        console.log('⚠️ Servidor recusou: '+JSON.stringify(resp));
+        atualizarStatusConexao();
+      }
     })
-    .catch(()=>{adicionarFilaOffline();});
-}
-
-function adicionarFilaOffline(){
-  // Marca que há uma sincronização pendente (guardamos só 1 marcador, pois DB já tem tudo salvo local)
-  localStorage.setItem('resilient_campo_fila',JSON.stringify([{pendente:true,data:new Date().toISOString()}]));
-  atualizarStatusConexao();
-}
-
-function processarFilaOffline(){
-  const fila=JSON.parse(localStorage.getItem('resilient_campo_fila')||'[]');
-  if(fila.length===0)return;
-  if(!SCRIPT_URL||!navigator.onLine)return;
-  const payload={acao:'syncAll',dados:DB};
-  fetch(SCRIPT_URL,{method:'POST',mode:'no-cors',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
-    .then(()=>{
-      localStorage.removeItem('resilient_campo_fila');
+    .catch(err=>{
+      _enviandoFila=false;
+      console.log('⚠️ Falha de envio, tentando depois: '+err);
       atualizarStatusConexao();
-      console.log('✅ Fila offline sincronizada com sucesso');
-    })
-    .catch(()=>{console.log('⚠️ Ainda sem conexão, tentando depois...');});
+    });
 }
+// compatibilidade com chamadas antigas
+function enviarParaSheets(){processarFila();}
+function processarFilaOffline(){processarFila();}
 
-// Tenta processar a fila periodicamente (a cada 30s) e quando o app reabre
-setInterval(processarFilaOffline,30000);
+// Tenta processar a fila periodicamente (a cada 20s) e quando o app reabre
+setInterval(processarFila,20000);
+
+// ===== COMPRESSÃO DE FOTOS =====
+// Reduz fotos para caber com folga no Sheets e deixar o envio leve
+function comprimirImagem(dataUrl,cb,maxLado,qualidade){
+  maxLado=maxLado||1280;qualidade=qualidade||0.72;
+  const img=new Image();
+  img.onload=function(){
+    let w=img.width,h=img.height;
+    if(w>maxLado||h>maxLado){const esc=maxLado/Math.max(w,h);w=Math.round(w*esc);h=Math.round(h*esc);}
+    const cv=document.createElement('canvas');cv.width=w;cv.height=h;
+    cv.getContext('2d').drawImage(img,0,0,w,h);
+    cb(cv.toDataURL('image/jpeg',qualidade));
+  };
+  img.onerror=function(){cb(dataUrl);};
+  img.src=dataUrl;
+}
 
 function carregarDoSheets(cb){
   if(!SCRIPT_URL||!navigator.onLine){atualizarStatusConexao();if(cb)cb();return;}
@@ -357,9 +387,18 @@ function carregarDoSheets(cb){
         if(data.demandas&&data.demandas.length)DB.demandas=data.demandas;
         if(data.visitas&&data.visitas.length)DB.visitas=data.visitas;
         if(data.vinculos&&data.vinculos.length)DB.vinculos=data.vinculos;
+        // PROTEÇÃO: reaplica itens pendentes da fila por cima dos dados do servidor,
+        // para que alterações locais ainda não confirmadas NUNCA sejam perdidas.
+        filaLer().forEach(p=>{
+          const mapa={Demandas:'demandas',Visitas:'visitas',Usuarios:'usuarios',Condominios:'condominios',Vinculos:'vinculos'};
+          const chave=mapa[p.aba];if(!chave||!DB[chave])return;
+          const i=DB[chave].findIndex(x=>x.id===p.item.id);
+          if(i>=0)DB[chave][i]=p.item;else DB[chave].push(p.item);
+        });
         localStorage.setItem('resilient_campo_db',JSON.stringify(DB));
       }
       atualizarStatusConexao();
+      processarFila();
       if(cb)cb();
     })
     .catch(()=>{atualizarStatusConexao();if(cb)cb();});
@@ -541,7 +580,7 @@ function registrarChegada(){
 function capturarFotoChegada(input){
   const file=input.files[0];if(!file)return;
   const reader=new FileReader();
-  reader.onload=e=>{_fotoChegada=e.target.result;document.getElementById('chegada-foto-preview').src=e.target.result;document.getElementById('chegada-foto-preview').classList.remove('hidden');};
+  reader.onload=e=>{comprimirImagem(e.target.result,img=>{_fotoChegada=img;document.getElementById('chegada-foto-preview').src=img;document.getElementById('chegada-foto-preview').classList.remove('hidden');});};
   reader.readAsDataURL(file);
 }
 
@@ -553,8 +592,9 @@ function confirmarChegada(){
   btn.textContent='⏳ Registrando...';
   const obs=document.getElementById('chegada-obs').value.trim();
   function salvar(lat,lng){
-    DB.visitas.push({id:gid(),usuarioId:USUARIO_LOGADO.id,usuarioNome:USUARIO_LOGADO.nome,condoId:CONDO_ATUAL.id,condoNome:CONDO_ATUAL.nome,data:new Date().toISOString(),foto:_fotoChegada,obs,lat,lng});
-    salvarDB();
+    const visita={id:gid(),usuarioId:USUARIO_LOGADO.id,usuarioNome:USUARIO_LOGADO.nome,condoId:CONDO_ATUAL.id,condoNome:CONDO_ATUAL.nome,data:new Date().toISOString(),foto:_fotoChegada,obs,lat,lng};
+    DB.visitas.push(visita);
+    salvarDB('Visitas',visita);
     fm('modal-chegada');
     atualizarStatusChegada();
     renderHome();
@@ -597,7 +637,7 @@ function capturarFotoDemanda(input){
   const file=input.files[0];if(!file)return;
   if(_fotosDemanda.length>=MAX_FOTOS_DEMANDA){alert('Máximo de '+MAX_FOTOS_DEMANDA+' fotos por demanda.');input.value='';return;}
   const reader=new FileReader();
-  reader.onload=e=>{_fotosDemanda.push(e.target.result);renderFotosDemandaPreview();};
+  reader.onload=e=>{comprimirImagem(e.target.result,img=>{_fotosDemanda.push(img);renderFotosDemandaPreview();});};
   reader.readAsDataURL(file);
   input.value='';
 }
@@ -614,7 +654,7 @@ function renderFotosDemandaPreview(){
 }
 function capturarVideoDemanda(input){
   const file=input.files[0];if(!file)return;
-  if(file.size>25*1024*1024){alert('Vídeo muito grande (máx. 25MB). Grave um vídeo mais curto.');input.value='';return;}
+  if(file.size>10*1024*1024){alert('Vídeo muito grande (máx. 10MB). Grave um vídeo mais curto (15-20 segundos).');input.value='';return;}
   const reader=new FileReader();
   reader.onload=e=>{_videoDemanda=e.target.result;renderVideoDemandaPreview();};
   reader.readAsDataURL(file);
@@ -646,7 +686,7 @@ function salvarDemanda(){
       atribuidoPara:'',
       lat,lng,fotoAntes:null,fotoDepois:null,execObs:'',concluidoEm:null,concluidoPor:''};
     DB.demandas.push(obj);
-    salvarDB();
+    salvarDB('Demandas',obj);
     fm('modal-demanda');
     renderDemandasCondo();
     renderHome();
@@ -728,10 +768,10 @@ function abrirExecutar(id){
 function capturarFotoExec(input,tipo){
   const file=input.files[0];if(!file)return;
   const reader=new FileReader();
-  reader.onload=e=>{
-    if(tipo==='antes'){_fotoExecAntes=e.target.result;document.getElementById('ex-foto-antes-preview').src=e.target.result;document.getElementById('ex-foto-antes-preview').classList.remove('hidden');document.getElementById('ex-antes-placeholder').classList.add('hidden');}
-    else{_fotoExecDepois=e.target.result;document.getElementById('ex-foto-depois-preview').src=e.target.result;document.getElementById('ex-foto-depois-preview').classList.remove('hidden');document.getElementById('ex-depois-placeholder').classList.add('hidden');}
-  };
+  reader.onload=e=>{comprimirImagem(e.target.result,img=>{
+    if(tipo==='antes'){_fotoExecAntes=img;document.getElementById('ex-foto-antes-preview').src=img;document.getElementById('ex-foto-antes-preview').classList.remove('hidden');document.getElementById('ex-antes-placeholder').classList.add('hidden');}
+    else{_fotoExecDepois=img;document.getElementById('ex-foto-depois-preview').src=img;document.getElementById('ex-foto-depois-preview').classList.remove('hidden');document.getElementById('ex-depois-placeholder').classList.add('hidden');}
+  });};
   reader.readAsDataURL(file);
 }
 
@@ -757,7 +797,7 @@ function concluirDemanda(){
   d.execObs=document.getElementById('ex-obs').value.trim();
   d.concluidoEm=new Date().toISOString();
   d.concluidoPor=USUARIO_LOGADO.nome;
-  salvarDB();
+  salvarDB('Demandas',d);
   fm('modal-executar');
   renderDemandasCondo();
   renderHome();
