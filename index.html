@@ -231,6 +231,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   <div class="modal-hdr"><h3>Registrar Execução</h3><button class="modal-cls" onclick="fm('modal-executar')">×</button></div>
   <div class="modal-body">
     <input type="hidden" id="ex-demanda-id">
+    <div id="ex-checklist-area"></div>
     <div class="info-box green">Registre fotos de antes e depois do serviço realizado.</div>
     <div class="foto-row">
       <div class="foto-box">
@@ -520,7 +521,7 @@ function renderDemandaCard(d){
   const condo=DB.condominios.find(c=>c.id===d.condoId);
   const responsavel=d.atribuidoPara?DB.usuarios.find(u=>u.id===d.atribuidoPara):null;
   return `<div class="demanda-card ${d.status==='concluida'?'concluida':''}" onclick="verDemanda('${d.id}')">
-    <div class="topo"><strong>${d.categoria}</strong>${statusBadge}</div>
+    <div class="topo"><strong>${d.tipoManutencao==='preventiva'?'🔧 ':''}${d.categoria}</strong>${statusBadge}</div>
     <div class="desc">${d.descricao}</div>
     <div class="meta">🏢 ${condo?.nome||''} • 📅 ${formatarData(d.criadoEm)} ${d.prioridade==='urgente'?'• 🔴 Urgente':''}${responsavel?` • 👤 ${responsavel.nome}`:''}</div>
   </div>`;
@@ -664,8 +665,19 @@ function salvarDemanda(){
 function verDemanda(id){
   const d=DB.demandas.find(x=>x.id===id);if(!d)return;
   const statusBadge=d.status==='concluida'?'<span class="badge b-green">Concluída</span>':d.status==='andamento'?'<span class="badge b-yellow">Em Andamento</span>':'<span class="badge b-orange">Aberta</span>';
-  let html=`<div style="margin-bottom:12px;">${statusBadge} <span class="badge b-blue">${d.categoria}</span> ${d.prioridade==='urgente'?'<span class="badge b-red">Urgente</span>':''} ${d.tipo==='administrativa'?'<span class="badge b-blue">Tarefa do Síndico</span>':''}</div>
+  let html=`<div style="margin-bottom:12px;">${statusBadge} <span class="badge b-blue">${d.categoria}</span> ${d.prioridade==='urgente'?'<span class="badge b-red">Urgente</span>':''} ${d.tipoManutencao==='preventiva'?'<span class="badge b-green">🔧 Preventiva</span>':''} ${d.tipo==='administrativa'?'<span class="badge b-blue">Tarefa do Síndico</span>':''}</div>
     <p style="margin-bottom:10px;">${d.descricao}</p>`;
+  if(d.checklist&&d.checklist.length){
+    const respostas=d.checklistResultado||[];
+    html+=`<div style="background:var(--bg);border-radius:var(--r-sm);padding:10px 12px;margin-bottom:10px;">
+      <strong style="font-size:12px;">✓ CHECKLIST</strong>
+      ${d.checklist.map((it,i)=>{
+        const r=respostas.find(x=>x.item===it)||respostas[i];
+        const icone=!r||!r.resposta?'⬜':r.resposta==='sim'?'✅':r.resposta==='nao'?'❌':'➖';
+        return `<div style="font-size:13px;margin-top:6px;">${icone} ${it}${r&&r.obs?` <span style="color:var(--text3);">— ${r.obs}</span>`:''}</div>`;
+      }).join('')}
+    </div>`;
+  }
   const fotos=d.fotos&&d.fotos.length?d.fotos:(d.foto?[d.foto]:[]);
   if(fotos.length)html+=`<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">${fotos.map(f=>`<img src="${f}" style="width:90px;height:90px;object-fit:cover;border-radius:8px;">`).join('')}</div>`;
   if(d.video)html+=`<video src="${d.video}" controls style="width:100%;max-height:220px;border-radius:8px;margin-bottom:8px;"></video>`;
@@ -689,6 +701,22 @@ function verDemanda(id){
 function abrirExecutar(id){
   document.getElementById('ex-demanda-id').value=id;
   document.getElementById('ex-obs').value='';
+  const dChk=DB.demandas.find(x=>x.id===id);
+  const area=document.getElementById('ex-checklist-area');
+  if(dChk&&dChk.checklist&&dChk.checklist.length){
+    area.innerHTML=`<div style="background:var(--bg);border-radius:var(--r-sm);padding:12px;margin-bottom:12px;">
+      <strong style="font-size:13px;">✓ Checklist da Preventiva</strong>
+      ${dChk.checklist.map((it,i)=>`<div style="margin-top:10px;border-top:1px solid rgba(0,0,0,.06);padding-top:8px;">
+        <div style="font-size:13px;margin-bottom:6px;">${it}</div>
+        <div style="display:flex;gap:6px;">
+          <label style="flex:1;text-align:center;font-size:12px;padding:7px 0;border-radius:8px;background:#fff;border:1px solid #cde;"><input type="radio" name="chk-${i}" value="sim" style="margin-right:4px;">✅ Sim</label>
+          <label style="flex:1;text-align:center;font-size:12px;padding:7px 0;border-radius:8px;background:#fff;border:1px solid #cde;"><input type="radio" name="chk-${i}" value="nao" style="margin-right:4px;">❌ Não</label>
+          <label style="flex:1;text-align:center;font-size:12px;padding:7px 0;border-radius:8px;background:#fff;border:1px solid #cde;"><input type="radio" name="chk-${i}" value="na" style="margin-right:4px;">➖ N.A.</label>
+        </div>
+        <input id="chk-obs-${i}" placeholder="Observação (opcional)" style="width:100%;margin-top:6px;font-size:12px;padding:6px 8px;border-radius:8px;border:1px solid #dde;">
+      </div>`).join('')}
+    </div>`;
+  } else area.innerHTML='';
   document.getElementById('ex-foto-antes-preview').classList.add('hidden');
   document.getElementById('ex-foto-depois-preview').classList.add('hidden');
   document.getElementById('ex-antes-placeholder').classList.remove('hidden');
@@ -713,6 +741,16 @@ function concluirDemanda(){
   btn.disabled=true;const txtOriginal=btn.textContent;btn.textContent='⏳ Salvando...';
   const id=document.getElementById('ex-demanda-id').value;
   const d=DB.demandas.find(x=>x.id===id);if(!d){btn.disabled=false;btn.textContent=txtOriginal;return;}
+  if(d.checklist&&d.checklist.length){
+    const resultado=[];let faltando=false;
+    d.checklist.forEach((it,i)=>{
+      const marcado=document.querySelector(`input[name="chk-${i}"]:checked`);
+      if(!marcado)faltando=true;
+      resultado.push({item:it,resposta:marcado?marcado.value:'',obs:document.getElementById(`chk-obs-${i}`)?.value.trim()||''});
+    });
+    if(faltando){alert('⚠️ Responda todos os itens do checklist antes de concluir.');btn.disabled=false;btn.textContent=txtOriginal;return;}
+    d.checklistResultado=resultado;
+  }
   d.status='concluida';
   d.fotoAntes=_fotoExecAntes;
   d.fotoDepois=_fotoExecDepois;
